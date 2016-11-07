@@ -1,0 +1,22 @@
+(cl:in-package temoto-msg)
+(cl:export '(HEADER-VAL
+          HEADER
+          SCALE_BY-VAL
+          SCALE_BY
+          LIVE_HAND_POSE-VAL
+          LIVE_HAND_POSE
+          CARTESIAN_WAYPOSES-VAL
+          CARTESIAN_WAYPOSES
+          IN_NATURAL_CONTROL_MODE-VAL
+          IN_NATURAL_CONTROL_MODE
+          ORIENTATION_FREE-VAL
+          ORIENTATION_FREE
+          POSITION_UNLIMITED-VAL
+          POSITION_UNLIMITED
+          POSITION_FORWARD_ONLY-VAL
+          POSITION_FORWARD_ONLY
+          IN_NAVIGATION_MODE-VAL
+          IN_NAVIGATION_MODE
+          END_EFFECTOR_POSE-VAL
+          END_EFFECTOR_POSE
+))

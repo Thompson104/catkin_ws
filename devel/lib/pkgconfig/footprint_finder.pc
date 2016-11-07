@@ -1,0 +1,8 @@
+prefix=/home/conor/catkin_ws/devel
+
+Name: footprint_finder
+Description: Description of footprint_finder
+Version: 0.0.0
+Cflags: 
+Libs: -L/home/conor/catkin_ws/devel/lib 
+Requires: 

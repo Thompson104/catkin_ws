@@ -1,0 +1,8 @@
+prefix=/home/conor/catkin_ws/devel
+
+Name: temoto_sia5_moveit_config
+Description: Description of temoto_sia5_moveit_config
+Version: 0.2.0
+Cflags: 
+Libs: -L/home/conor/catkin_ws/devel/lib 
+Requires: 

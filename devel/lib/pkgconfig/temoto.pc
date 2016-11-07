@@ -1,0 +1,8 @@
+prefix=/home/conor/catkin_ws/devel
+
+Name: temoto
+Description: Description of temoto
+Version: 0.0.0
+Cflags: -I/home/conor/catkin_ws/devel/include -I/home/conor/catkin_ws/src/temoto_intuitive_teleoperator/temoto/include
+Libs: -L/home/conor/catkin_ws/devel/lib 
+Requires: roscpp rospy std_msgs geometry_msgs

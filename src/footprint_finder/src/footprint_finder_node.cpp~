@@ -1,0 +1,611 @@
+#include <ros/ros.h>
+#include <tf/transform_listener.h>
+#include <tf/transform_broadcaster.h>
+#include "geometry_msgs/PolygonStamped.h"
+
+//#include <array>
+#include <vector>
+#include <sstream>
+#include "std_msgs/Float32.h"
+#include <cmath>
+#include <algorithm>
+
+// Can remove the below include once done debugging:
+#include <ros/console.h>
+
+/* Might need to use this for dynamically reconfiguring the parameter if we can't just publish to topic:
+#include <dynamic_reconfigure/DoubleParameter.h>
+#include <dynamic_reconfigure/Reconfigure.h>
+#include <dynamic_reconfigure/Config.h>  
+Google search this to find the example code provided online for using writing to dynamic parameters in C++ (seems easier in python?)*/
+
+struct Point;
+
+typedef double coord_t;         // coordinate type
+typedef double coord2_t;  	// must be big enough to hold 2*max(|coordinate|)^2
+
+coord2_t cross(const Point &O, const Point &A, const Point &B);
+
+geometry_msgs::Polygon convex_hull(std::vector<geometry_msgs::Point32> Poly_In);
+
+int main(int argc, char** argv){
+
+// --------------------------------------------------- ROS stuffs -------------------------------------------------------
+  ros::init(argc, argv, "footprint_finder_node");
+  ros::NodeHandle node; 
+  // ---------------------- Publishers ----------------------
+  float running_rate = 3.0;
+
+  ros::Publisher footprint_pub_global = node.advertise<geometry_msgs::Polygon>("move_base/global_costmap/footprint", running_rate);  
+  ros::Publisher footprint_pub_local = node.advertise<geometry_msgs::Polygon>("move_base/local_costmap/footprint", running_rate);  
+  ros::Publisher footprint_pub_other = node.advertise<geometry_msgs::PolygonStamped>("/move_base/global_costmap/obstacle_layer_footprint/footprint_stamped", running_rate);
+  tf::TransformBroadcaster broadcaster_right_eef_tip;
+  tf::TransformBroadcaster broadcaster_left_eef_tip;
+  tf::TransformBroadcaster broadcaster_right_elbow;
+  tf::TransformBroadcaster broadcaster_left_elbow;
+
+// -------------------------- Thickness parameters for arm links (currently hard-coded) ----------------------------------
+  float shoulder_thickness	= 0.2;
+  float upper_arm_thickness	= 0.15;
+  float forearm_thickness	= 0.15;
+  float wrist_1_thickness	= 0.12;
+  float wrist_2_thickness	= 0.12;
+  float wrist_3_thickness 	= 0.12;
+  float eef_thickness 		= 0.2;
+  float base_fore_length	= 0.546;  // distance from Fore Bumper to base_link origin
+  float base_rear_length 	= 0.546;  // distance from Rear Bumper to base_link origin
+  float base_half_width 	= 0.33;   // distance between side of robot and base_link_origin
+  float lidar_length 		= 0.178;
+  float lidar_width 		= 0.1524;
+  float end_effector_length_R 	= 0.368;
+  float end_effector_length_L 	= 0.216;
+  float upper_arm_length 	= 0.4318;
+  float last_eefR_x 		= 0.0;
+  float last_eefR_y 		= 0.0;
+  float last_eefL_x 		= 0.0;
+  float last_eefL_y 		= 0.0;
+  float time_since_calculated 	= 0.0;
+  
+// ---------- Declaration of TRANSFORMLISTENERS - one for each Joint at a link base, and for each end effector -----------
+  tf::TransformListener listener_map_base; // base_link 		-->  Base Location
+  // Left Arm
+  tf::TransformListener listener_map_J1L;  // left_ur5_shoulder_link	-->  (L) upper arm flexion
+  tf::TransformListener listener_map_J2L;  // left_ur5_upper_arm_link	-->  (L) upper arm abduction
+  tf::TransformListener listener_map_J3L;  // left_ur5_forearm_link 	-->  (L) forearm flexion
+  tf::TransformListener listener_map_J4L;  // left_ur5_wrist_1_link 	-->  (L) first wrist
+  tf::TransformListener listener_map_J5L;  // left_ur5_wrist_2_link 	-->  (L) second wrist
+  tf::TransformListener listener_map_J6L;  // left_ur5_wrist_3_link 	-->  (L) third wrist
+  tf::TransformListener listener_map_eefL; // left_ur5_ee_link 		-->  (L) end effector
+  // Right Arm
+  tf::TransformListener listener_map_J1R;  // right_ur5_shoulder_link	-->  (R) upper arm flexion
+  tf::TransformListener listener_map_J2R;  // right_ur5_upper_arm_link	-->  (R) upper arm abduction
+  tf::TransformListener listener_map_J3R;  // right_ur5_forearm_link 	-->  (R) forearm flexion
+  tf::TransformListener listener_map_J4R;  // right_ur5_wrist_1_link 	-->  (R) first wrist
+  tf::TransformListener listener_map_J5R;  // right_ur5_wrist_2_link 	-->  (R) second wrist
+  tf::TransformListener listener_map_J6R;  // right_ur5_wrist_3_link 	-->  (R) third wrist
+  tf::TransformListener listener_map_eefR; // right_ur5_ee_link 	-->  (R) end effector
+  tf::TransformListener listener_map_elbowL;
+  tf::TransformListener listener_map_elbowR;
+
+// --------------------------- Declaration of STAMPEDTRANFORMS - one for each listener -------------------------------------
+    tf::StampedTransform transform_map_base; // base_link 		-->  Base Location
+  // Left Arm
+    tf::StampedTransform transform_map_J1L;  // left_ur5_shoulder_link	   -->  (L) upper arm flexion
+    tf::StampedTransform transform_map_J2L;  // left_ur5_upper_arm_link	   -->  (L) upper arm abduction
+    tf::StampedTransform transform_map_J3L;  // left_ur5_forearm_link 	   -->  (L) forearm flexion
+    tf::StampedTransform transform_map_J4L;  // left_ur5_wrist_1_link 	   -->  (L) first wrist
+    tf::StampedTransform transform_map_J5L;  // left_ur5_wrist_2_link 	   -->  (L) second wrist
+    tf::StampedTransform transform_map_J6L;  // left_ur5_wrist_3_link 	   -->  (L) third wrist
+    tf::StampedTransform transform_map_eefL; // left_ur5_ee_link	   -->  (L) end effector
+  // Right Arm
+    tf::StampedTransform transform_map_J1R;  // right_ur5_shoulder_link	   -->  (R) upper arm flexion
+    tf::StampedTransform transform_map_J2R;  // right_ur5_upper_arm_link   -->  (R) upper arm abduction
+    tf::StampedTransform transform_map_J3R;  // right_ur5_forearm_link 	   -->  (R) forearm flexion
+    tf::StampedTransform transform_map_J4R;  // right_ur5_wrist_1_link 	   -->  (R) first wrist
+    tf::StampedTransform transform_map_J5R;  // right_ur5_wrist_2_link 	   -->  (R) second wrist
+    tf::StampedTransform transform_map_J6R;  // right_ur5_wrist_3_link 	   -->  (R) third wrist
+    tf::StampedTransform transform_map_eefR; // right_ur5_ee_link 	   -->  (R) end effector
+    tf::Transform transform_J6L_Leeftip;
+    tf::Transform transform_J6R_Reeftip;
+    tf::Transform transform_J2L_elbowL;
+    tf::Transform transform_J2R_elbowR;
+    tf::StampedTransform transform_map_elbowL;
+    tf::StampedTransform transform_map_elbowR;
+
+// ----------------------------------------------------- Main Loop --------------------------------------------------------
+  ros::Rate rate(running_rate);
+  while (node.ok()){
+    transform_J6L_Leeftip.setOrigin( tf::Vector3(end_effector_length_L, 0.0, 0.0) );
+    transform_J6L_Leeftip.setRotation( tf::createQuaternionFromRPY(0.0, 0.0, 0.0) );
+    broadcaster_left_eef_tip.sendTransform(tf::StampedTransform(transform_J6L_Leeftip, ros::Time::now(), "/left_ur5_ee_link", "/left_eef_tip"));
+    transform_J6R_Reeftip.setOrigin( tf::Vector3(end_effector_length_R, 0.0, 0.0) );
+    transform_J6R_Reeftip.setRotation( tf::createQuaternionFromRPY(0.0, 0.0, 0.0) );
+    broadcaster_right_eef_tip.sendTransform(tf::StampedTransform(transform_J6R_Reeftip, ros::Time::now(), "/right_ur5_ee_link", "/right_eef_tip"));
+
+    transform_J2L_elbowL.setOrigin( tf::Vector3(0.0, 0.0, upper_arm_length) );
+    transform_J2L_elbowL.setRotation( tf::createQuaternionFromRPY(0.0, 0.0, 0.0) );
+    broadcaster_left_elbow.sendTransform(tf::StampedTransform(transform_J2L_elbowL, ros::Time::now(), "/left_ur5_upper_arm_link", "/left_ur5_elbow_joint"));
+    transform_J2R_elbowR.setOrigin( tf::Vector3(0.0, 0.0, upper_arm_length) );
+    transform_J2R_elbowR.setRotation( tf::createQuaternionFromRPY(0.0, 0.0, 0.0) );
+    broadcaster_right_eef_tip.sendTransform(tf::StampedTransform(transform_J2R_elbowR, ros::Time::now(), "/right_ur5_upper_arm_link", "/right_ur5_elbow_joint"));
+
+    try{  // right_ur5_ee_link  	-->  (R) end effector -----------------------------------------------
+      listener_map_eefR.lookupTransform("/map", 
+                               "/right_eef_tip", ros::Time(0), transform_map_eefR);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }  
+    try{ // left_ur5_ee_link 		-->  (L) end effector ----------------------------------------------
+      listener_map_eefL.lookupTransform("/map", 
+                               "/left_eef_tip", ros::Time(0), transform_map_eefL);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }
+
+    // Cheating loop - only runs entire program from here on if robot has moved the end effectors in "/map", or if it's been a while since it's run
+    if (transform_map_eefL.getOrigin().x()-last_eefL_x > 0.1 || transform_map_eefL.getOrigin().y()-last_eefL_y > .1 || transform_map_eefR.getOrigin().x()-last_eefR_x > 0.1 || transform_map_eefR.getOrigin().y()-last_eefR_y > .1 || time_since_calculated >= 2) {
+       
+       last_eefL_x = transform_map_eefL.getOrigin().x();
+       last_eefL_y = transform_map_eefL.getOrigin().y();
+       last_eefR_x = transform_map_eefR.getOrigin().x();
+       last_eefR_y = transform_map_eefR.getOrigin().y();
+       time_since_calculated = 0;
+ROS_INFO("running! %f %f %f %f", last_eefL_x, last_eefL_y, last_eefR_x, last_eefR_y);
+// ------------------------------------------------- Lookup TRANSFORMS -------------------------------------------------------
+
+    try{  // base_link  		-->  Base Location ----------------------------------------------
+      listener_map_base.lookupTransform("/map", 
+                               "/base_link", ros::Time(0), transform_map_base);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   } 
+
+  // ------------------------------------------ Left Arm -----------------------------------------------------------
+    try{  // left_ur5_shoulder_link	-->  (L) upper arm flexion --------------------------------------
+      listener_map_J1L.lookupTransform("/map", 
+                               "/left_ur5_shoulder_link", ros::Time(0), transform_map_J1L);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }
+    try{   // left_ur5_upper_arm_link	-->  (L) upper arm abduction -------------------------------------
+      listener_map_J2L.lookupTransform("/map", 
+                               "/left_ur5_upper_arm_link", ros::Time(0), transform_map_J2L);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }
+    try{   // left_ur5_upper_arm_link	-->  (L) upper arm elbow -----------------------------------------
+      listener_map_elbowL.lookupTransform("/map", 
+                               "/left_ur5_elbow_joint", ros::Time(0), transform_map_elbowL);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   } 
+    try{  // left_ur5_forearm_link 	-->  (L) forearm flexion -----------------------------------------
+      listener_map_J3L.lookupTransform("/map", 
+                               "/left_ur5_forearm_link", ros::Time(0), transform_map_J3L);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }
+    try{  // left_ur5_wrist_1_link 	-->  (L) first wrist ----------------------------------------------
+      listener_map_J4L.lookupTransform("/map", 
+                               "/left_ur5_wrist_1_link", ros::Time(0), transform_map_J4L);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }
+    try{  // left_ur5_wrist_2_link 	-->  (L) second wrist ----------------------------------------------
+      listener_map_J5L.lookupTransform("/map", 
+                               "/left_ur5_wrist_2_link", ros::Time(0), transform_map_J5L);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }
+    try{  // left_ur5_wrist_3_link 	-->  (L) third wrist ----------------------------------------------
+      listener_map_J6L.lookupTransform("/map", 
+                               "/left_ur5_wrist_3_link", ros::Time(0), transform_map_J6L);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }
+
+  // ------------------------------------------ Right Arm ------------------------------------------------------------
+    try{  // right_ur5_shoulder_link	-->  (R) upper arm flexion -----------------------------------------
+      listener_map_J1R.lookupTransform("/map", 
+                               "/right_ur5_shoulder_link", ros::Time(0), transform_map_J1R);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }
+    try{  // right_ur5_upper_arm_link	-->  (R) upper arm abduction ----------------------------------------
+      listener_map_J2R.lookupTransform("/map", 
+                               "/right_ur5_upper_arm_link", ros::Time(0), transform_map_J2R);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }
+    try{  // right_ur5_upper_arm_link	-->  (R) upper arm elbow --------------------------------------------
+      listener_map_elbowR.lookupTransform("/map", 
+                               "/right_ur5_elbow_joint", ros::Time(0), transform_map_elbowR);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }
+    try{  // right_ur5_forearm_link 	-->  (R) forearm flexion --------------------------------------------
+      listener_map_J3R.lookupTransform("/map", 
+                               "/right_ur5_forearm_link", ros::Time(0), transform_map_J3R);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }
+    try{  // right_ur5_wrist_1_link 	-->  (R) first wrist ------------------------------------------------
+      listener_map_J4R.lookupTransform("/map", 
+                               "/right_ur5_wrist_1_link", ros::Time(0), transform_map_J4R);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }
+    try{  // right_ur5_wrist_2_link 	-->  (R) second wrist -----------------------------------------------
+      listener_map_J5R.lookupTransform("/map", 
+                               "/right_ur5_wrist_2_link", ros::Time(0), transform_map_J5R);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }
+    try{  // right_ur5_wrist_3_link 	-->  (R) third wrist ------------------------------------------------
+      listener_map_J6R.lookupTransform("/map", 
+                               "/right_ur5_wrist_3_link", ros::Time(0), transform_map_J6R);   }
+    catch (tf::TransformException &ex) {
+      ROS_ERROR("%s",ex.what());
+      ros::Duration(1.0).sleep();
+      continue;   }  
+
+    geometry_msgs::Polygon footprint_polygon;
+    geometry_msgs::Point32 t1;
+
+// -------------------------------------- Create Array of Points -------------------------------------------- 
+    std::vector<geometry_msgs::Point32> footprintPoints;
+
+  // ----------------------------------- Base ----------------------------------------------
+    // Base Point - Front Left
+    t1.x = transform_map_base.getOrigin().x() + base_fore_length;
+    t1.y = transform_map_base.getOrigin().y() + base_half_width; 
+    footprintPoints.push_back(t1);
+    // Base Point - Front Right
+    t1.x = transform_map_base.getOrigin().x() + base_fore_length;
+    t1.y = transform_map_base.getOrigin().y() - base_half_width; 
+    footprintPoints.push_back(t1);
+    // Base Point - Rear Left
+    t1.x = transform_map_base.getOrigin().x() - base_fore_length;
+    t1.y = transform_map_base.getOrigin().y() + base_half_width; 
+    footprintPoints.push_back(t1);
+    // Base Point - Rear Right
+    t1.x = transform_map_base.getOrigin().x() - base_fore_length;
+    t1.y = transform_map_base.getOrigin().y() - base_half_width; 
+    footprintPoints.push_back(t1);
+    // LIDAR - Right Point
+    t1.x = transform_map_base.getOrigin().x() + base_fore_length + lidar_length;
+    t1.y = transform_map_base.getOrigin().y() + lidar_width/2; 
+    footprintPoints.push_back(t1);
+    // LIDAR - Left Point
+    t1.x = transform_map_base.getOrigin().x() + base_fore_length + lidar_length;
+    t1.y = transform_map_base.getOrigin().y() - lidar_width/2; 
+    footprintPoints.push_back(t1);
+
+  // ---------------------------------- Left Arm -------------------------------------------    
+    // Upper Arm Flexion Joint (left_ur5_shoulder_link)
+    t1.x = transform_map_J1L.getOrigin().x() + shoulder_thickness/2;
+    t1.y = transform_map_J1L.getOrigin().y() + shoulder_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J1L.getOrigin().x() + shoulder_thickness/2;
+    t1.y = transform_map_J1L.getOrigin().y() - shoulder_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J1L.getOrigin().x() - shoulder_thickness/2;
+    t1.y = transform_map_J1L.getOrigin().y() + shoulder_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J1L.getOrigin().x() - shoulder_thickness/2;
+    t1.y = transform_map_J1L.getOrigin().y() - shoulder_thickness/2; 
+    footprintPoints.push_back(t1);
+    // Upper Arm Abduction Joint (left_ur5_upper_arm_link)
+    t1.x = transform_map_J2L.getOrigin().x() + upper_arm_thickness/2;
+    t1.y = transform_map_J2L.getOrigin().y() + upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J2L.getOrigin().x() + upper_arm_thickness/2;
+    t1.y = transform_map_J2L.getOrigin().y() - upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J2L.getOrigin().x() - upper_arm_thickness/2;
+    t1.y = transform_map_J2L.getOrigin().y() + upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J2L.getOrigin().x() - upper_arm_thickness/2;
+    t1.y = transform_map_J2L.getOrigin().y() - upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    // Upper Arm Abduction Joint (left_ur5_elbow_joint)
+    t1.x = transform_map_elbowL.getOrigin().x() + upper_arm_thickness/2;
+    t1.y = transform_map_elbowL.getOrigin().y() + upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_elbowL.getOrigin().x() + upper_arm_thickness/2;
+    t1.y = transform_map_elbowL.getOrigin().y() - upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_elbowL.getOrigin().x() - upper_arm_thickness/2;
+    t1.y = transform_map_elbowL.getOrigin().y() + upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_elbowL.getOrigin().x() - upper_arm_thickness/2;
+    t1.y = transform_map_elbowL.getOrigin().y() - upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    // Forearm Flexion Joint (left_ur5_forearm_link)
+    t1.x = transform_map_J3L.getOrigin().x() + forearm_thickness/2;
+    t1.y = transform_map_J3L.getOrigin().y() + forearm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J3L.getOrigin().x() + forearm_thickness/2;
+    t1.y = transform_map_J3L.getOrigin().y() - forearm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J3L.getOrigin().x() - forearm_thickness/2;
+    t1.y = transform_map_J3L.getOrigin().y() + forearm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J3L.getOrigin().x() - forearm_thickness/2;
+    t1.y = transform_map_J3L.getOrigin().y() - forearm_thickness/2; 
+    footprintPoints.push_back(t1);
+    // Wrist 1 Joint (left_ur5_wrist_1_link)
+    t1.x = transform_map_J4L.getOrigin().x() + wrist_1_thickness/2;
+    t1.y = transform_map_J4L.getOrigin().y() + wrist_1_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J4L.getOrigin().x() + wrist_1_thickness/2;
+    t1.y = transform_map_J4L.getOrigin().y() - wrist_1_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J4L.getOrigin().x() - wrist_1_thickness/2;
+    t1.y = transform_map_J4L.getOrigin().y() + wrist_1_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J4L.getOrigin().x() - wrist_1_thickness/2;
+    t1.y = transform_map_J4L.getOrigin().y() - wrist_1_thickness/2; 
+    footprintPoints.push_back(t1);
+    // Wrist 2 Joint (left_ur5_wrist_2_link)
+    t1.x = transform_map_J5L.getOrigin().x() + wrist_2_thickness/2;
+    t1.y = transform_map_J5L.getOrigin().y() + wrist_2_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J5L.getOrigin().x() + wrist_2_thickness/2;
+    t1.y = transform_map_J5L.getOrigin().y() - wrist_2_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J5L.getOrigin().x() - wrist_2_thickness/2;
+    t1.y = transform_map_J5L.getOrigin().y() + wrist_2_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J5L.getOrigin().x() - wrist_2_thickness/2;
+    t1.y = transform_map_J5L.getOrigin().y() - wrist_2_thickness/2; 
+    footprintPoints.push_back(t1);
+    // Wrist 3 Joint (left_ur5_wrist_3_link)
+    t1.x = transform_map_J6L.getOrigin().x() + wrist_3_thickness/2;
+    t1.y = transform_map_J6L.getOrigin().y() + wrist_3_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J6L.getOrigin().x() + wrist_3_thickness/2;
+    t1.y = transform_map_J6L.getOrigin().y() - wrist_3_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J6L.getOrigin().x() - wrist_3_thickness/2;
+    t1.y = transform_map_J6L.getOrigin().y() + wrist_3_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J6L.getOrigin().x() - wrist_3_thickness/2;
+    t1.y = transform_map_J6L.getOrigin().y() - wrist_3_thickness/2; 
+    footprintPoints.push_back(t1);
+    // End Effector Tip (left_ur5_ee_link)
+    t1.x = transform_map_eefL.getOrigin().x() + eef_thickness/2;
+    t1.y = transform_map_eefL.getOrigin().y() + eef_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_eefL.getOrigin().x() + eef_thickness/2;
+    t1.y = transform_map_eefL.getOrigin().y() - eef_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_eefL.getOrigin().x() - eef_thickness/2;
+    t1.y = transform_map_eefL.getOrigin().y() + eef_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_eefL.getOrigin().x() - eef_thickness/2;
+    t1.y = transform_map_eefL.getOrigin().y() - eef_thickness/2; 
+    footprintPoints.push_back(t1);
+
+  // --------------------------------- Right Arm --------------------------------------------    
+    // Upper Arm Flexion Joint (right_ur5_shoulder_link)
+    t1.x = transform_map_J1R.getOrigin().x() + shoulder_thickness/2;
+    t1.y = transform_map_J1R.getOrigin().y() + shoulder_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J1R.getOrigin().x() + shoulder_thickness/2;
+    t1.y = transform_map_J1R.getOrigin().y() - shoulder_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J1R.getOrigin().x() - shoulder_thickness/2;
+    t1.y = transform_map_J1R.getOrigin().y() + shoulder_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J1R.getOrigin().x() - shoulder_thickness/2;
+    t1.y = transform_map_J1R.getOrigin().y() - shoulder_thickness/2; 
+    footprintPoints.push_back(t1);
+    // Upper Arm Abduction Joint (right_ur5_upper_arm_link)
+    t1.x = transform_map_J2R.getOrigin().x() + upper_arm_thickness/2;
+    t1.y = transform_map_J2R.getOrigin().y() + upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J2R.getOrigin().x() + upper_arm_thickness/2;
+    t1.y = transform_map_J2R.getOrigin().y() - upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J2R.getOrigin().x() - upper_arm_thickness/2;
+    t1.y = transform_map_J2R.getOrigin().y() + upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J2R.getOrigin().x() - upper_arm_thickness/2;
+    t1.y = transform_map_J2R.getOrigin().y() - upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    // Upper Arm Abduction Joint (right_ur5_elbow_joint)
+    t1.x = transform_map_elbowR.getOrigin().x() + upper_arm_thickness/2;
+    t1.y = transform_map_elbowR.getOrigin().y() + upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_elbowR.getOrigin().x() + upper_arm_thickness/2;
+    t1.y = transform_map_elbowR.getOrigin().y() - upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_elbowR.getOrigin().x() - upper_arm_thickness/2;
+    t1.y = transform_map_elbowR.getOrigin().y() + upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_elbowR.getOrigin().x() - upper_arm_thickness/2;
+    t1.y = transform_map_elbowR.getOrigin().y() - upper_arm_thickness/2; 
+    footprintPoints.push_back(t1);
+    // Forearm Flexion Joint (right_ur5_forearm_link)
+    t1.x = transform_map_J3R.getOrigin().x() + forearm_thickness/2;
+    t1.y = transform_map_J3R.getOrigin().y() + forearm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J3R.getOrigin().x() + forearm_thickness/2;
+    t1.y = transform_map_J3R.getOrigin().y() - forearm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J3R.getOrigin().x() - forearm_thickness/2;
+    t1.y = transform_map_J3R.getOrigin().y() + forearm_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J3R.getOrigin().x() - forearm_thickness/2;
+    t1.y = transform_map_J3R.getOrigin().y() - forearm_thickness/2; 
+    footprintPoints.push_back(t1);
+    // Wrist 1 Joint (right_ur5_wrist_1_link)
+    t1.x = transform_map_J4R.getOrigin().x() + wrist_1_thickness/2;
+    t1.y = transform_map_J4R.getOrigin().y() + wrist_1_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J4R.getOrigin().x() + wrist_1_thickness/2;
+    t1.y = transform_map_J4R.getOrigin().y() - wrist_1_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J4R.getOrigin().x() - wrist_1_thickness/2;
+    t1.y = transform_map_J4R.getOrigin().y() + wrist_1_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J4R.getOrigin().x() - wrist_1_thickness/2;
+    t1.y = transform_map_J4R.getOrigin().y() - wrist_1_thickness/2; 
+    footprintPoints.push_back(t1);
+    // Wrist 2 Joint (right_ur5_wrist_2_link)
+    t1.x = transform_map_J5R.getOrigin().x() + wrist_2_thickness/2;
+    t1.y = transform_map_J5R.getOrigin().y() + wrist_2_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J5R.getOrigin().x() + wrist_2_thickness/2;
+    t1.y = transform_map_J5R.getOrigin().y() - wrist_2_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J5R.getOrigin().x() - wrist_2_thickness/2;
+    t1.y = transform_map_J5R.getOrigin().y() + wrist_2_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J5R.getOrigin().x() - wrist_2_thickness/2;
+    t1.y = transform_map_J5R.getOrigin().y() - wrist_2_thickness/2; 
+    footprintPoints.push_back(t1);
+    // Wrist 3 Joint (right_ur5_wrist_3_link)
+    t1.x = transform_map_J6R.getOrigin().x() + wrist_3_thickness/2;
+    t1.y = transform_map_J6R.getOrigin().y() + wrist_3_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J6R.getOrigin().x() + wrist_3_thickness/2;
+    t1.y = transform_map_J6R.getOrigin().y() - wrist_3_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J6R.getOrigin().x() - wrist_3_thickness/2;
+    t1.y = transform_map_J6R.getOrigin().y() + wrist_3_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_J6R.getOrigin().x() - wrist_3_thickness/2;
+    t1.y = transform_map_J6R.getOrigin().y() - wrist_3_thickness/2; 
+    footprintPoints.push_back(t1);
+    // End Effector Tip (right_ur5_ee_link)
+    t1.x = transform_map_eefR.getOrigin().x() + eef_thickness/2;
+    t1.y = transform_map_eefR.getOrigin().y() + eef_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_eefR.getOrigin().x() + eef_thickness/2;
+    t1.y = transform_map_eefR.getOrigin().y() - eef_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_eefR.getOrigin().x() - eef_thickness/2;
+    t1.y = transform_map_eefR.getOrigin().y() + eef_thickness/2; 
+    footprintPoints.push_back(t1);
+    t1.x = transform_map_eefR.getOrigin().x() - eef_thickness/2;
+    t1.y = transform_map_eefR.getOrigin().y() - eef_thickness/2; 
+    footprintPoints.push_back(t1); 
+
+    
+
+// -------------------------------------- Operate on Array, Make Convex -------------------------------------------- 
+
+    footprint_polygon = convex_hull(footprintPoints);     			// CONVEX HULL of all points chosen, found via code included below main()
+    
+    geometry_msgs::PolygonStamped footprint_polygon_stamped; 			// STAMPED POLYGON (RViz topic expects a stamped polygon; costmaps expect unstamped)
+    footprint_polygon_stamped.polygon = footprint_polygon; 			  // Polygon Data
+    footprint_polygon_stamped.header.stamp = ros::Time(0); 			  // Timestamp
+    footprint_polygon_stamped.header.frame_id = "map"; 				  // Frame ID
+
+    //footprint_pub_global.publish(footprint_polygon); 				// GLOBAL COSTMAP footprint (presumed needed for CONFLICT checking)
+    //footprint_pub_local.publish(footprint_polygon); 				// LOCAL COSTMAP footprint (presumed needed for CONFLICT checking)
+    footprint_pub_other.publish(footprint_polygon_stamped); 			// RVIZ footprint (only subscribed to by RViz; this is what makes the GUI footprint)
+
+    }  // End of "Cheater loop" (only runs all this is robot has moved the end effectors in "/map" or if it's been a while since it's run
+    else time_since_calculated += 1/running_rate;
+ROS_INFO("%f", time_since_calculated);
+    rate.sleep();
+
+  }
+  return 0;
+};
+
+// ---------------------------------- CONVEX HULL PROGRAM - found this code online ---------------------------------------
+
+// MODIFIED Implementation of Andrew's monotone chain 2D convex hull algorithm.
+//   --> just modified to use geometry_msgs::Point32 instead of the Point struct originally defined here (actually, ended up using the point struct because can't apply comparators to Point32, but takes/returns Point32)
+// Asymptotic complexity: O(n log n).
+// Practical performance: 0.5-1.0 seconds for n=1000000 on a 1GHz machine.
+
+struct Point {
+	coord_t x, y;
+ 	
+ 	//Point(float x_in, float y_in) { x = x_in; y = y_in; }
+	
+	bool operator <(const Point &p) const {
+		return x < p.x || (x == p.x && y < p.y);
+	}
+};
+
+// 2D cross product of OA and OB vectors, i.e. z-component of their 3D cross product.
+// Returns a positive value, if OAB makes a counter-clockwise turn,
+// negative for clockwise turn, and zero if the points are collinear.
+coord2_t cross(const Point &O, const Point &A, const Point &B)
+{
+	return (A.x - O.x) * (B.y - O.y) - (A.y - O.y) * (B.x - O.x);
+}
+
+// Returns a list of points on the convex hull in counter-clockwise order.
+// Note: the last point in the returned list is the same as the first one.
+geometry_msgs::Polygon convex_hull(std::vector<geometry_msgs::Point32> Poly_In)
+{
+        std::vector<Point> P;
+	Point point_for_input;
+	for (int i=0; i<Poly_In.size(); i++) { 
+ 	  point_for_input.x = Poly_In[i].x;
+ 	  point_for_input.y = Poly_In[i].y;
+ 	  P.push_back(point_for_input); } 
+
+        int n = P.size(), k = 0;
+	std::vector<Point> H(2*n);
+
+	// Sort points lexicographically
+	sort(P.begin(), P.end());
+
+	// Build lower hull
+	for (int i = 0; i < n; ++i) {
+		while (k >= 2 && cross(H[k-2], H[k-1], P[i]) <= 0) k--;
+		H[k++] = P[i];
+	}
+
+	// Build upper hull
+	for (int i = n-2, t = k+1; i >= 0; i--) {
+		while (k >= t && cross(H[k-2], H[k-1], P[i]) <= 0) k--;
+		H[k++] = P[i];
+	}
+
+	H.resize(k-1);
+
+        geometry_msgs::Polygon Poly_Out;
+	geometry_msgs::Point32 point_for_output;
+	for (int i=0; i<H.size(); i++) { 
+ 	  point_for_output.x = H[i].x;
+ 	  point_for_output.y = H[i].y;
+ 	  Poly_Out.points.push_back(point_for_output); }
+        
+	return Poly_Out;
+}
+
+/* NOTES:
+Currently, just estimating edges of arm as a rectangle of side length = thickness of link centered at the joint, with sides in X and Y of the global frame.
+ - Could make more accurate by setting the sides in X and Y of the link frame
+ - Actually, does it need to be offset in y...? I think so, but not necessarily by the thickness of the joint...?
+ - Also, need to update joint thicknesses (possibly can get from some robot-defining file somewhere?
+ - Consider replacing a lot of the repetitive code with calls to a separately defined funciton
+ - Remove console.h when done debugging
+ - Why do I have a separate list of sortedPoints and polygon? can just merge these?
+
+*/
